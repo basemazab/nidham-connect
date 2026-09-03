@@ -30,12 +30,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Prove the in-box compiler is really there before building, and record
+      # which one it was. (`-version` is not an option this compiler accepts —
+      # it is old enough to predate the flag, which is rather the point.)
       - name: Show the compiler being used
         shell: pwsh
         run: |
           $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
           if (-not (Test-Path $csc)) { throw "csc.exe not found on the runner" }
-          & $csc -version
+          $v = (Get-Item $csc).VersionInfo
+          Write-Host "$csc  ($($v.ProductVersion))"
 
       - name: Build
         shell: pwsh
