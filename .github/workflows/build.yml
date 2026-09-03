@@ -1,0 +1,109 @@
+# Build and test Nidham Connect on a clean GitHub-hosted Windows runner.
+#
+# Why this exists: a release built on a laptop is a release nobody can verify.
+# SignPath's origin verification checks that the signed artifact came from this
+# repository, on this branch, through this pipeline — so the pipeline has to be
+# the thing that builds it.
+#
+# The build needs no SDK and no package manager. `csc.exe` ships inside Windows
+# as part of .NET Framework 4.x and is present on windows-latest, which is also
+# the only compiler this project has ever used.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write   # only used by the release step, on tags
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the compiler being used
+        shell: pwsh
+        run: |
+          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $csc)) { throw "csc.exe not found on the runner" }
+          & $csc -version
+
+      - name: Build
+        shell: pwsh
+        run: .\build.ps1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The gate. e2e.mjs starts byte-exact fake ZK devices on localhost and
+      # drives the real built exe against them. Its exit code is the gate and
+      # nothing else — a previous release shipped from a test that printed
+      # success and exited non-zero.
+      - name: Test
+        shell: pwsh
+        run: |
+          node test\e2e.mjs
+          if ($LASTEXITCODE -ne 0) { throw "e2e failed ($LASTEXITCODE)" }
+
+      - name: Check the version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $src = Get-Content src\Program.cs -Raw
+          if ($src -notmatch [regex]::Escape('public const string Version = "' + $tag + '"')) {
+            throw "tag $tag does not match the Version constant in src\Program.cs"
+          }
+          $exe = Get-Item dist\Nidham-Connect.exe
+          if ($exe.VersionInfo.ProductVersion -notlike "$tag*") {
+            throw "built exe reports $($exe.VersionInfo.ProductVersion), expected $tag"
+          }
+          Write-Host "version $tag consistent across tag, source and binary metadata"
+
+      # ── Signing (enabled once the SignPath Foundation certificate is granted) ──
+      #
+      # To turn on: add the SIGNPATH_API_TOKEN secret and set the two vars, then
+      # uncomment. The unsigned artifact upload above stays as-is; SignPath picks
+      # up the artifact from this run, signs it, and returns it.
+      #
+      # - name: Sign with SignPath
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+      #     project-slug: nidham-connect
+      #     signing-policy-slug: release-signing
+      #     github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      #     wait-for-completion: true
+      #     output-artifact-directory: signed
+
+      - name: Upload the build artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nidham-Connect
+          path: dist/Nidham-Connect.exe
+          if-no-files-found: error
+
+      # Both names come from the SAME file: Nidham-Connect.exe is the real one,
+      # Nidham-Connect-Setup.exe is the v1 name kept alive so links already sent
+      # to customers keep working.
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          Copy-Item dist\Nidham-Connect.exe dist\Nidham-Connect-Setup.exe
+          gh release upload "${{ github.ref_name }}" `
+            dist\Nidham-Connect.exe dist\Nidham-Connect-Setup.exe --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
