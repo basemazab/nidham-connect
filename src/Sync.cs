@@ -51,6 +51,17 @@ namespace NidhamConnect
                 + (string.IsNullOrEmpty(read.DeviceName) ? "" : " · " + read.DeviceName)
                 + (string.IsNullOrEmpty(read.Serial) ? "" : " #" + read.Serial));
 
+            // 🔴 Device identity pinning — the ZK protocol has no auth by default
+            // (comm key 0), so anything answering on this IP is trusted blindly
+            // unless we check. Attendance feeds payroll, so a device that suddenly
+            // reports a different serial than the one pinned at add-time is
+            // treated as an impostor and refused BEFORE any data reaches the server.
+            if (!string.IsNullOrEmpty(dev.Serial) && !string.IsNullOrEmpty(read.Serial) && read.Serial != dev.Serial)
+            {
+                throw new ZkException("SERIAL_MISMATCH",
+                    "الجهاز على " + dev.Ip + " رد بسريال مختلف عن اللي اتسجّل (كان " + dev.Serial + "، دلوقتي " + read.Serial + ") — البيانات اتوقفت. لو الجهاز اتغيّر فعلًا، احذفه وضيفه تاني.");
+            }
+
             DateTime since;
             DateTime? last = ParseStamp(dev.LastStamp);
             if (last != null) since = last.Value.AddHours(-OVERLAP_HOURS);
@@ -116,6 +127,7 @@ namespace NidhamConnect
                     case "REFUSED": return "الجهاز رفض الاتصال — اتأكد إن العنوان صح وإن الجهاز شغّال";
                     case "TIMEOUT":
                     case "UNREACHABLE": return "مش لاقيين الجهاز — اتأكد إن الكمبيوتر ده على نفس شبكة الجهاز (نفس الراوتر) وإن كابل الشبكة في الجهاز متوصّل";
+                    case "SERIAL_MISMATCH": return z.Message;
                     default: return "الجهاز رد بشكل غير متوقع (" + z.Message + ") — جرّب تاني، ولو استمر ابعتلنا السجل";
                 }
             }

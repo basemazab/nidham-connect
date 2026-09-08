@@ -8,6 +8,7 @@
 //   --probe <ip[:port]> [--commkey N] [--out file]     handshake + serial
 //   --pair <CODE> --config <dir> [--out file]          exchange code → token
 //   --sync-once --config <dir> [--out file]            sync all configured devices
+//   --verify-sig <exe> --sig <file> [--out file]       check an update signature (release gate)
 //   --uninstall [--purge]                              remove autostart, shortcut, exe
 //   --portable                                         run from here, never install
 //   --minimized                                        start hidden in the tray
@@ -28,7 +29,7 @@ namespace NidhamConnect
 {
     public static class App
     {
-        public const string Version = "2.0.4";
+        public const string Version = "2.0.5";
         public const string ProductName = "نِظام كونكت";
         public static string ExePath { get { return Application.ExecutablePath; } }
         public static string InstallDir
@@ -71,6 +72,7 @@ namespace NidhamConnect
             if (a.Has("--probe")) return Cli.Probe(a);
             if (a.Has("--pair")) return Cli.Pair(a, cfgDir);
             if (a.Has("--sync-once")) return Cli.SyncOnce(a, cfgDir);
+            if (a.Has("--verify-sig")) return Cli.VerifySig(a);
 
             // ── GUI ──
             if (a.Has("--uninstall")) return Cli.Uninstall(a);
@@ -320,6 +322,26 @@ namespace NidhamConnect
             {
                 Program.Emit(a, "{\"ok\":false,\"code\":\"OTHER\",\"error\":" + Esc(e.Message) + "}");
                 return 3;
+            }
+        }
+
+        // Headless gate for the release script and its e2e test: check a
+        // built exe against a .sig file the exact way Updater.ApplyAndRestart
+        // will, without needing a real GitHub release to test against.
+        public static int VerifySig(Args a)
+        {
+            try
+            {
+                byte[] data = File.ReadAllBytes(a.Get("--verify-sig"));
+                byte[] sig = File.ReadAllBytes(a.Get("--sig"));
+                bool ok = Updater.VerifySignatureForTest(data, sig);
+                Program.Emit(a, "{\"ok\":" + (ok ? "true" : "false") + "}");
+                return ok ? 0 : 1;
+            }
+            catch (Exception e)
+            {
+                Program.Emit(a, "{\"ok\":false,\"error\":" + Esc(e.Message) + "}");
+                return 2;
             }
         }
 

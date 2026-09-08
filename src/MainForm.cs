@@ -712,6 +712,10 @@ namespace NidhamConnect
         public DeviceConfig Result;
         readonly Config cfg;
         TextBox ip, port, key, name, days; Label msg; Button test, ok;
+        // Serial pinned by the last successful "اختبار الاتصال" — only trusted
+        // in DoOk() if the IP field still matches what was actually tested.
+        string testedIp = null;
+        string testedSerial = "";
 
         public AddDeviceDialog(Config cfg)
         {
@@ -769,8 +773,11 @@ namespace NidhamConnect
                 msg.ForeColor = Color.SeaGreen;
                 msg.Text = "✓ الجهاز رد: " + (string.IsNullOrEmpty(r.DeviceName) ? "جهاز بصمة" : r.DeviceName) + (string.IsNullOrEmpty(r.Serial) ? "" : " #" + r.Serial) + " — " + r.LogCount + " بصمة في الذاكرة";
                 if (string.IsNullOrEmpty(name.Text.Trim()) && !string.IsNullOrEmpty(r.DeviceName)) name.Text = r.DeviceName;
+                // 🔴 Pin the serial now so the sync loop can later detect a
+                // swapped device at this IP (Sync.Device's mismatch check).
+                testedIp = cip; testedSerial = r.Serial ?? "";
             }
-            catch (Exception e) { msg.ForeColor = Color.Firebrick; msg.Text = Sync.Arabic(e); }
+            catch (Exception e) { msg.ForeColor = Color.Firebrick; msg.Text = Sync.Arabic(e); testedIp = null; }
             finally { test.Enabled = true; }
         }
 
@@ -779,7 +786,12 @@ namespace NidhamConnect
             string cip; int p, k, d;
             if (!Validate(out cip, out p, out k, out d)) return;
             foreach (DeviceConfig dc in cfg.Devices) if (dc.Ip == cip && dc.Port == p) { msg.Text = "الجهاز ده متضاف بالفعل"; return; }
-            Result = new DeviceConfig { Key = Guid.NewGuid().ToString(), Ip = cip, Port = p, CommKey = k, SinceDays = d, Name = string.IsNullOrEmpty(name.Text.Trim()) ? "جهاز البصمة (" + cip + ")" : name.Text.Trim() };
+            // Only trust the pinned serial if it was tested against this exact
+            // IP — if the user changed the IP field after testing, don't carry
+            // a stale serial over to the wrong device. Not tested at all is
+            // fine too: the first successful sync pins it instead.
+            string serial = (testedIp == cip) ? testedSerial : "";
+            Result = new DeviceConfig { Key = Guid.NewGuid().ToString(), Ip = cip, Port = p, CommKey = k, SinceDays = d, Name = string.IsNullOrEmpty(name.Text.Trim()) ? "جهاز البصمة (" + cip + ")" : name.Text.Trim(), Serial = serial };
             cfg.Devices.Add(Result);
             DialogResult = DialogResult.OK;
             Close();

@@ -45,14 +45,19 @@ instead — the scan is a convenience, not a requirement.
 
 ## Known limitations, stated plainly
 
-- **The binary is not yet code-signed.** This is why the source is public: to
-  apply for a free certificate from the SignPath Foundation. Until then
-  Windows SmartScreen will warn on first run.
-- **The updater does not verify a code signature** on the downloaded
-  replacement, because there is no signature to verify yet. It checks that the
-  download came from GitHub over TLS, that the file is a PE image, and that
-  its size matches what the release metadata declared. Authenticode
-  verification is the first thing that gets added once a certificate exists.
+- **The binary is not yet Authenticode-signed.** This is why the source is
+  public: to apply for a free certificate from the SignPath Foundation. Until
+  then Windows SmartScreen will warn on first run.
+- **The updater verifies a detached signature independent of Authenticode.**
+  (2026-09-08) Every release now ships `Nidham-Connect.exe.sig`, an
+  RSA-2048/SHA-256 signature made with a key that is generated and held
+  offline — never in this repository, never on a build server. The updater
+  (`src/Updater.cs`) refuses to stage or apply a downloaded exe unless it
+  verifies against the public key embedded in the binary, checked once before
+  staging and again right before the staged file is ever executed. This does
+  not replace Authenticode/SmartScreen trust (still pending SignPath); it
+  closes the separate, narrower gap of "the update channel had no independent
+  integrity check at all" regardless of that.
 - **The pairing token is stored in plain text** in
   `%APPDATA%\Nidham Connect\config.json`, protected only by the Windows user's
   file permissions. Anyone who can already read that user's files can read the

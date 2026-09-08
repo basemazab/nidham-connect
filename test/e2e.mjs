@@ -9,6 +9,7 @@
 // `--out <file>`, not stdout. Every assertion below reads that file.
 
 import http from "node:http";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -335,6 +336,34 @@ console.log("8) المزامنة → الشكل اللي بيوصل السيرف
   });
 }
 
+// ── 8b) pinned serial mismatch — refuses an impostor instead of trusting it ──
+// The ZK wire protocol has no device authentication (comm key 0 by default),
+// so anything answering at the configured IP is trusted unless the app checks
+// the serial itself against what was pinned earlier. Attendance feeds payroll,
+// so this must fail closed: no data reaches the server, and the stale config
+// on disk must NOT be overwritten with the impostor's identity.
+console.log("8b) تغيير السيريال — الجهاز يترفض");
+{
+  const cfg = JSON.parse(fs.readFileSync(path.join(cfgDir, "config.json"), "utf8"));
+  const staleLastStamp = cfg.devices[0].lastStamp;
+  cfg.devices[0].serial = "WRONGSERIAL999"; // no longer matches the sim's real serial
+  fs.writeFileSync(path.join(cfgDir, "config.json"), JSON.stringify(cfg, null, 2));
+  const before = received.length;
+  const r = await run(["--sync-once", "--config", cfgDir, "--server", SERVER]);
+  check("السيريال المختلف بيوقف المزامنة", () => assert.equal(r.json.devices[0].ok, false));
+  check("الكود SERIAL_MISMATCH", () => assert.equal(r.json.devices[0].code, "SERIAL_MISMATCH"));
+  check("رسالة عربي بتقول سريال مختلف", () => assert.ok(/سريال مختلف/.test(r.json.devices[0].error)));
+  check("مفيش طلب اتبعت للسيرفر خالص", () => assert.equal(received.length, before));
+  check("الكيرسور والسيريال المحفوظين متغيّروش", () => {
+    const after = JSON.parse(fs.readFileSync(path.join(cfgDir, "config.json"), "utf8"));
+    assert.equal(after.devices[0].serial, "WRONGSERIAL999");
+    assert.equal(after.devices[0].lastStamp, staleLastStamp);
+  });
+  // restore the correct pinned serial for the remaining tests
+  cfg.devices[0].serial = "SIMX99887766";
+  fs.writeFileSync(path.join(cfgDir, "config.json"), JSON.stringify(cfg, null, 2));
+}
+
 // ── 9) idempotent resend + heartbeat ──
 console.log("9) نافذة الـ48 ساعة والـheartbeat");
 {
@@ -410,6 +439,33 @@ console.log("12) الواجهة بتفتح");
     assert.equal(r2.json.paired, false);
     assert.equal(r2.json.pairScreen, true);
   });
+}
+
+// ── 13) update-signature verification never becomes a silent no-op ──
+// This can't prove a REAL signature verifies true without the production
+// private key (deliberately not in this repo — see sign-release.ps1's own
+// self-check for that half). What it guards forever, with no secret needed,
+// is the far more dangerous regression: a "verification" that quietly
+// accepts anything. If this ever goes green with a fixed `true`, these fail.
+console.log("13) توقيع التحديث بيرفض توقيع مش صحيح");
+{
+  const realExe = EXE;
+  const garbageSig = path.join(tmp, "garbage.sig");
+
+  fs.writeFileSync(garbageSig, Buffer.alloc(0));
+  let r = await run(["--verify-sig", realExe, "--sig", garbageSig]);
+  check("توقيع فاضي → مرفوض", () => assert.equal(r.json?.ok, false));
+
+  fs.writeFileSync(garbageSig, crypto.randomBytes(256)); // right shape for RSA-2048, wrong content
+  r = await run(["--verify-sig", realExe, "--sig", garbageSig]);
+  check("توقيع عشوائي بنفس طول RSA-2048 → مرفوض", () => assert.equal(r.json?.ok, false));
+
+  fs.writeFileSync(garbageSig, crypto.randomBytes(3));
+  r = await run(["--verify-sig", realExe, "--sig", garbageSig]);
+  check("توقيع بطول غلط → مرفوض من غير ما يقع", () => assert.equal(r.json?.ok, false));
+
+  r = await run(["--verify-sig", realExe, "--sig", path.join(tmp, "does-not-exist.sig")]);
+  check("ملف توقيع مش موجود → مرفوض من غير ما يقع", () => assert.equal(r.json?.ok, false));
 }
 
 await sim.close();
