@@ -29,7 +29,7 @@ namespace NidhamConnect
 {
     public static class App
     {
-        public const string Version = "2.0.5";
+        public const string Version = "2.1.0";
         public const string ProductName = "نِظام كونكت";
         public static string ExePath { get { return Application.ExecutablePath; } }
         public static string InstallDir
@@ -374,9 +374,11 @@ namespace NidhamConnect
             if (!cfg.Paired) { Program.Emit(a, "{\"ok\":false,\"error\":\"not paired\"}"); return 2; }
             StringBuilder sb = new StringBuilder("{\"ok\":true,\"devices\":[");
             bool first = true; int failures = 0;
+            if (cfg.Devices.Count == 0) Sync.ReportNoDevices(cfg, Log.Write).GetAwaiter().GetResult();
             foreach (DeviceConfig dev in cfg.Devices)
             {
                 if (!first) sb.Append(","); first = false;
+                Exception readFailure = null;
                 try
                 {
                     SyncOutcome o = Sync.Device(cfg, dev, Log.Write).GetAwaiter().GetResult();
@@ -392,7 +394,9 @@ namespace NidhamConnect
                     ZkException z = e as ZkException;
                     Log.Write("❌ " + Sync.Label(dev) + ": " + Sync.Arabic(e));
                     sb.Append("{\"key\":" + Esc(dev.Key) + ",\"ok\":false,\"code\":" + Esc(z != null ? z.Code : "API") + ",\"error\":" + Esc(Sync.Arabic(e)) + "}");
+                    readFailure = e;
                 }
+                if (readFailure != null) Sync.ReportFailure(cfg, dev, readFailure, Log.Write).GetAwaiter().GetResult();
             }
             sb.Append("]}");
             Program.Emit(a, sb.ToString());

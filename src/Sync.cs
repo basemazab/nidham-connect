@@ -110,10 +110,79 @@ namespace NidhamConnect
                 }
             }
             o.NewStamp = fresh.Count > 0 ? Stamp(fresh[fresh.Count - 1].At) : dev.LastStamp;
+            ClearReport(dev.Key);
             return o;
         }
 
         public static string Label(DeviceConfig d) { return string.IsNullOrEmpty(d.Name) ? d.Ip : d.Name; }
+
+        // ── Failure reports (2.1.0) ──────────────────────────────────────────
+        // A device-read failure used to live ONLY on the customer's screen: /sync
+        // is called after a successful read, so the server saw a paired agent with
+        // zero punches and no reason. Now the failure (or «no devices added») is
+        // reported to /api/device-agent/report and shown on the devices page.
+        // Throttled per device: the same code again within 30 min is not re-sent.
+        // Only ZkException is reported: an ApiException means the server itself
+        // rejected or was unreachable, so a report would fail the same way.
+        const double REPORT_EVERY_MIN = 30;
+        const string NO_DEVICES_SLOT = "*no-devices*";
+        static readonly Dictionary<string, KeyValuePair<string, DateTime>> lastReport =
+            new Dictionary<string, KeyValuePair<string, DateTime>>();
+
+        public static string ReportCode(string zkCode)
+        {
+            switch (zkCode)
+            {
+                case "COMM_KEY":
+                case "REFUSED":
+                case "TIMEOUT":
+                case "UNREACHABLE":
+                case "SERIAL_MISMATCH":
+                    return zkCode;
+                default:
+                    return "PROTOCOL";
+            }
+        }
+
+        public static async Task ReportFailure(Config cfg, DeviceConfig dev, Exception err, Action<string> log)
+        {
+            ZkException z = err as ZkException;
+            if (z == null || dev == null) return;
+            await SendReport(cfg, dev, dev.Key, ReportCode(z.Code), Arabic(err), log);
+        }
+
+        public static async Task ReportNoDevices(Config cfg, Action<string> log)
+        {
+            await SendReport(cfg, null, NO_DEVICES_SLOT, "NO_DEVICES", "مفيش أجهزة بصمة متضافة في البرنامج", log);
+        }
+
+        // A successful read clears the throttle, so the next failure is reported at once.
+        public static void ClearReport(string deviceKey)
+        {
+            lock (lastReport) { lastReport.Remove(deviceKey); lastReport.Remove(NO_DEVICES_SLOT); }
+        }
+
+        static async Task SendReport(Config cfg, DeviceConfig dev, string slot, string code, string message, Action<string> log)
+        {
+            if (string.IsNullOrEmpty(cfg.Token)) return;
+            lock (lastReport)
+            {
+                KeyValuePair<string, DateTime> prev;
+                if (lastReport.TryGetValue(slot, out prev) && prev.Key == code
+                    && (DateTime.Now - prev.Value).TotalMinutes < REPORT_EVERY_MIN) return;
+            }
+            try
+            {
+                await Api.Report(cfg.Server, cfg.Token, dev, code, message, cfg.Devices.Count);
+                lock (lastReport) { lastReport[slot] = new KeyValuePair<string, DateTime>(code, DateTime.Now); }
+                log("↗ السبب اتبلّغ لنِظام — هيظهر في صفحة الأجهزة");
+            }
+            catch (Exception e)
+            {
+                // Never let the report break the sync loop (older server = 404, no internet = 0).
+                log("   (البلاغ لنِظام ماوصلش: " + e.Message + ")");
+            }
+        }
 
         // Arabic, actionable — the server's own message wins when it exists.
         public static string Arabic(Exception err)

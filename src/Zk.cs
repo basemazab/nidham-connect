@@ -225,9 +225,28 @@ namespace NidhamConnect
                 s.Dispose();
                 // UDP got no answer at all → nothing is listening there.
                 if (tr is UdpTransport && e.Code == "TIMEOUT") throw new ZkException("REFUSED", "no device answered on tcp or udp");
+                // Some firmware accepts TCP 4370 and never answers on it: the
+                // protocol is only spoken over UDP. The first real device
+                // (2026-10-06) did exactly this, so a silent TCP connect gets one
+                // UDP try before giving up.
+                if (tr is TcpTransport && e.Code == "TIMEOUT") return OpenUdp(ip, port, commKey, timeoutMs, e);
                 throw;
             }
             return s;
+        }
+
+        static ZkSession OpenUdp(string ip, int port, int commKey, int timeoutMs, ZkException tcpSilence)
+        {
+            ZkSession u = new ZkSession(new UdpTransport(ip, port), commKey, timeoutMs);
+            try { u.Connect(); return u; }
+            catch (ZkException e)
+            {
+                u.Dispose();
+                // Silent on UDP too: report the original TCP silence (the familiar
+                // «مش لاقيين الجهاز»), not a UDP detail.
+                if (e.Code == "TIMEOUT") throw tcpSilence;
+                throw;
+            }
         }
 
         static byte[] Packet(ushort cmd, ushort session, ushort reply, byte[] body)
@@ -278,9 +297,15 @@ namespace NidhamConnect
 
         void Auth()
         {
-            if (commKey <= 0) throw new ZkException("COMM_KEY", "device requires a comm key");
-            byte[] r = Exchange(ZkCmd.AUTH, MakeCommKey(commKey, session, 50), timeoutMs);
-            if (Zk.U16(r, 0) != ZkCmd.ACK_OK) throw new ZkException("COMM_KEY", "comm key rejected by device");
+            // The handshake goes out with the configured key even when it is 0:
+            // some firmware answers UNAUTH to every CONNECT and accepts the
+            // handshake with 0, which is what the official ZK software sends when
+            // its password field is 0 (the first real device, 2026-10-06). It is
+            // one attempt with the configured key; a rejection is a clear
+            // COMM_KEY, never a retry with other keys.
+            byte[] r = Exchange(ZkCmd.AUTH, MakeCommKey(Math.Max(0, commKey), session, 50), timeoutMs);
+            if (Zk.U16(r, 0) != ZkCmd.ACK_OK)
+                throw new ZkException("COMM_KEY", commKey <= 0 ? "device requires a comm key" : "comm key rejected by device");
             authed = true;
         }
 

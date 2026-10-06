@@ -33,7 +33,12 @@ const PORT_BIG = 14371;
 const PORT_UDP = 14372;
 const PORT_KEY = 14373;
 const PORT_KEYBAD = 14374;
+const PORT_ZEROKEY = 14375;
+const PORT_SITE = 14376;
 const PORT_API = 18099;
+// Nothing listens here: a device that's off / on another network (the 2.1.0
+// failure report is tested against it).
+const PORT_DEAD = 14379;
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "nc-e2e-"));
 const p2 = (n) => String(n).padStart(2, "0");
@@ -160,8 +165,16 @@ const udpPunches = [
   { pin: "99", at: at(8, 0, 0) },
 ];
 const udpSim = await startSim({ port: PORT_UDP, udp: true, serial: "SIMUDP0001", users: udpUsers, punches: udpPunches });
-const keyed = await startSim({ port: PORT_KEY, serial: "SIMKEY0001", users, punches, commKeyLocked: true, commKeyAccepts: true });
+const keyed = await startSim({ port: PORT_KEY, serial: "SIMKEY0001", users, punches, commKeyLocked: true, deviceKey: 1234 });
 const keyBad = await startSim({ port: PORT_KEYBAD, users, punches, commKeyLocked: true, commKeyAccepts: false });
+// Asks for the comm-key handshake even though its key is 0 (the menu says 0).
+const zeroKey = await startSim({ port: PORT_ZEROKEY, serial: "SIMZERO0001", users, punches, commKeyLocked: true, deviceKey: 0 });
+// The first real device in the field (2026-10-06): TCP 4370 accepts and stays
+// silent, the protocol answers over UDP only, and it asks for the handshake with key 0.
+const siteLike = await startSim({
+  port: PORT_SITE, udp: true, silentTcp: true, serial: "SIMSITE0001",
+  users: udpUsers, punches: udpPunches, commKeyLocked: true, deviceKey: 0,
+});
 
 // ── 1) version ──
 // Read the expected version from the source, never a literal: a hard-coded
@@ -247,6 +260,32 @@ console.log("5) جهاز عليه Comm Key");
   check("والرسالة عربي وبتقول يعمل إيه", () => assert.ok(/Comm Key/.test(noKey.json.arabic)));
   const bad = await run(["--probe", `127.0.0.1:${PORT_KEYBAD}`, "--commkey", "9999"]);
   check("مفتاح غلط → COMM_KEY برضه", () => assert.equal(bad.json?.code, "COMM_KEY"));
+}
+
+// ── 5b) the key is 0 and the device still asks for the handshake ──
+console.log("5b) الجهاز بيطلب تأكيد والمفتاح صفر");
+{
+  const r = await run(["--probe", `127.0.0.1:${PORT_ZEROKEY}`, "--full"]);
+  check("بيكمّل التأكيد بالصفر زي برنامج ZK الرسمي، مش بيستسلم", () => {
+    assert.equal(r.json?.ok, true, JSON.stringify(r.json));
+    assert.equal(r.json.punches, 5);
+  });
+  check("واتبعت تأكيد واحد بس (مش تخمين)", () =>
+    assert.equal(zeroKey.state.hits.filter((c) => c === 1102).length, 1));
+}
+
+// ── 4b) TCP open and silent, the device speaks UDP (the first real site) ──
+console.log("4b) TCP مفتوح وساكت، والجهاز على UDP");
+{
+  const r = await run(["--probe", `127.0.0.1:${PORT_SITE}`, "--full"]);
+  check("بيرجع لـUDP بدل ما يقف على TCP", () => {
+    assert.equal(r.json?.ok, true, JSON.stringify(r.json));
+    assert.equal(r.json.transport, "udp");
+  });
+  check("وقرا الجهاز كله", () => {
+    assert.equal(r.json.serial, "SIMSITE0001");
+    assert.equal(r.json.punches, 5);
+  });
 }
 
 // ── 6) unreachable device ──
@@ -353,7 +392,16 @@ console.log("8b) تغيير السيريال — الجهاز يترفض");
   check("السيريال المختلف بيوقف المزامنة", () => assert.equal(r.json.devices[0].ok, false));
   check("الكود SERIAL_MISMATCH", () => assert.equal(r.json.devices[0].code, "SERIAL_MISMATCH"));
   check("رسالة عربي بتقول سريال مختلف", () => assert.ok(/سريال مختلف/.test(r.json.devices[0].error)));
-  check("مفيش طلب اتبعت للسيرفر خالص", () => assert.equal(received.length, before));
+  // 2.1.0: the refusal is REPORTED (so the devices page can say why), but not a
+  // single punch or user reaches /sync.
+  const after8b = received.slice(before);
+  check("مفيش بصمات اتبعتت للسيرفر (مفيش /sync)", () =>
+    assert.equal(after8b.filter((x) => x.url.startsWith("/api/device-agent/sync")).length, 0));
+  check("السبب اتبلّغ: SERIAL_MISMATCH على /report", () => {
+    assert.equal(after8b.length, 1);
+    assert.ok(after8b[0].url.startsWith("/api/device-agent/report"));
+    assert.equal(after8b[0].json.code, "SERIAL_MISMATCH");
+  });
   check("الكيرسور والسيريال المحفوظين متغيّروش", () => {
     const after = JSON.parse(fs.readFileSync(path.join(cfgDir, "config.json"), "utf8"));
     assert.equal(after.devices[0].serial, "WRONGSERIAL999");
@@ -421,6 +469,60 @@ console.log("11) السيرفر بيرفض التوكن");
   syncStatus = 200;
 }
 
+// ── 11b) a failed read / no devices is REPORTED (2.1.0) ──
+// Before 2.1.0 the server only heard from the agent AFTER a successful read, so
+// 6 of 6 paired agents on production showed zero punches and no reason.
+console.log("11b) فشل القراية ومفيش أجهزة بيتبلّغوا لنِظام");
+{
+  const cfgPath = path.join(cfgDir, "config.json");
+  const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+  const savedDevices = cfg.devices;
+
+  cfg.devices = [{
+    key: "aaaa1111-2222-3333-4444-555566667777",
+    ip: "127.0.0.1", port: PORT_DEAD, commKey: 0, name: "جهاز مطفي",
+    sinceDays: 60, lastStamp: null, serial: "",
+  }];
+  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+  let before = received.length;
+  const r = await run(["--sync-once", "--config", cfgDir, "--server", SERVER], { timeoutMs: 120000 });
+  const got = received.slice(before);
+  const reports = got.filter((x) => x.url.startsWith("/api/device-agent/report"));
+  check("القراية فشلت", () => assert.equal(r.json?.devices?.[0]?.ok, false));
+  check("بلاغ واحد اتبعت لـ/report", () => assert.equal(reports.length, 1));
+  check("كود البلاغ = كود القراية الفاشلة", () => {
+    assert.ok(["REFUSED", "TIMEOUT", "UNREACHABLE"].includes(reports[0].json.code), reports[0].json.code);
+    assert.equal(reports[0].json.code, r.json.devices[0].code);
+  });
+  check("البلاغ فيه اسم الجهاز وعنوانه ورسالة عربي", () => {
+    assert.equal(reports[0].json.device.name, "جهاز مطفي");
+    assert.equal(reports[0].json.device.ip, "127.0.0.1");
+    assert.ok(/[\u0600-\u06FF]/.test(reports[0].json.message));
+    assert.equal(reports[0].json.configured_devices, 1);
+  });
+  check("بتوكن البرنامج والنسخة", () => {
+    assert.ok(String(reports[0].auth).startsWith("Bearer nda_"));
+    assert.equal(reports[0].json.version, SRC_VERSION);
+  });
+  check("مفيش /sync اتبعت", () => assert.equal(got.filter((x) => x.url.startsWith("/api/device-agent/sync")).length, 0));
+
+  cfg.devices = [];
+  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+  before = received.length;
+  await run(["--sync-once", "--config", cfgDir, "--server", SERVER]);
+  const noDev = received.slice(before);
+  check("مربوط ومفيش أجهزة ⇒ بلاغ NO_DEVICES", () => {
+    assert.equal(noDev.length, 1);
+    assert.ok(noDev[0].url.startsWith("/api/device-agent/report"));
+    assert.equal(noDev[0].json.code, "NO_DEVICES");
+    assert.equal(noDev[0].json.configured_devices, 0);
+    assert.equal(noDev[0].json.device, undefined);
+  });
+
+  cfg.devices = savedDevices;
+  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+}
+
 // ── 12) the window boots ──
 console.log("12) الواجهة بتفتح");
 {
@@ -473,6 +575,8 @@ await big.close();
 await udpSim.close();
 await keyed.close();
 await keyBad.close();
+await zeroKey.close();
+await siteLike.close();
 await new Promise((r) => api.close(r));
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
 

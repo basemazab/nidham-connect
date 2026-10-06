@@ -97,6 +97,24 @@ namespace NidhamConnect
             return s;
         }
 
+        // Device-read failure (or «no devices added») → /api/device-agent/report.
+        // Before 2.1.0 a failed read never reached the server: /sync is only called
+        // AFTER a successful read, so the devices page showed a paired agent with
+        // zero punches and no reason (6 of 6 on production, 2026-09-27).
+        public static async Task Report(string server, string token, DeviceConfig dev, string code, string message, int configuredDevices)
+        {
+            Dictionary<string, object> body = new Dictionary<string, object>();
+            body["version"] = App.Version; body["code"] = code; body["message"] = message ?? "";
+            body["configured_devices"] = configuredDevices;
+            if (dev != null)
+            {
+                Dictionary<string, object> device = new Dictionary<string, object>();
+                device["key"] = dev.Key; device["name"] = dev.Name ?? ""; device["ip"] = dev.Ip;
+                body["device"] = device;
+            }
+            await Post(server.TrimEnd('/') + "/api/device-agent/report", token, body);
+        }
+
         public static async Task<string> GetText(string url)
         {
             HttpResponseMessage res = await http.GetAsync(url);

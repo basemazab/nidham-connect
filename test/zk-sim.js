@@ -57,6 +57,20 @@ function payload(cmd, session, reply, body) {
   return p;
 }
 
+// The comm-key handshake body, same derivation as the client's MakeCommKey (public
+// zk-protocol spec). The device rebuilds it from its own key + the session and
+// compares, using the tick byte the client sent (byte 2 travels in the clear).
+function makeCommKey(key, sessionId, ticks) {
+  let k = 0;
+  for (let i = 0; i < 32; i++) k = ((k << 1) | ((key >>> i) & 1)) >>> 0;
+  k = (k + sessionId) >>> 0;
+  const b1 = ((k >>> 8) & 0xff) ^ 0x4b;
+  const b2 = ((k >>> 16) & 0xff) ^ 0x53;
+  const b3 = ((k >>> 24) & 0xff) ^ 0x4f;
+  const B = ticks & 0xff;
+  return Buffer.from([b2 ^ B, b3 ^ B, B, b1 ^ B]);
+}
+
 function tcpFrame(p) {
   const prefix = Buffer.from([0x50, 0x50, 0x82, 0x7d, 0, 0, 0, 0]);
   prefix.writeUInt32LE(p.length, 4);
@@ -136,7 +150,14 @@ function tableBody(records) {
 
 /**
  * startSim({port, serial, deviceName, users, punches, commKeyLocked,
- *           commKeyAccepts, chunked, udp})
+ *           commKeyAccepts, deviceKey, chunked, udp, silentTcp})
+ *
+ *   deviceKey: the key set on the device. When given, AUTH is accepted only if
+ *              it carries exactly this key (0 included); without it the old
+ *              commKeyAccepts switch decides.
+ *   silentTcp: UDP mode only. ALSO accept TCP on the same port and never say a
+ *              word. That is the first real device (2026-10-06): TCP 4370 open,
+ *              CONNECT unanswered, the protocol only spoken over UDP.
  */
 function startSim(opts = {}) {
   const state = {
@@ -147,6 +168,8 @@ function startSim(opts = {}) {
     punches: opts.punches ?? [],
     commKeyLocked: !!opts.commKeyLocked,     // demands AUTH
     commKeyAccepts: opts.commKeyAccepts !== false, // ...and accepts it
+    deviceKey: typeof opts.deviceKey === "number" ? opts.deviceKey : null,
+    silentTcp: !!opts.silentTcp,
     chunked: !!opts.chunked,
     udp: !!opts.udp,
     session: 0x5aa5,
@@ -171,9 +194,14 @@ function startSim(opts = {}) {
       return send(CMD.ACK_OK, replyId, "");
     }
     if (cmd === CMD.AUTH) {
-      // A real device verifies the scrambled key; the point under test here is
-      // that the client SENDS auth and recovers, not our own arithmetic.
-      if (!state.commKeyAccepts) return send(CMD.ACK_UNAUTH, replyId, "");
+      // With deviceKey the sim checks WHICH key the client sent (so «no key
+      // configured» and «the key is 0» are told apart); without it, the old
+      // switch only proves the client SENDS auth and recovers.
+      const accepted =
+        state.deviceKey !== null
+          ? body.length >= 4 && makeCommKey(state.deviceKey, state.session, body[2]).equals(body.subarray(0, 4))
+          : state.commKeyAccepts;
+      if (!accepted) return send(CMD.ACK_UNAUTH, replyId, "");
       state.authed = true;
       return send(CMD.ACK_OK, replyId, "");
     }
@@ -236,13 +264,30 @@ function startSim(opts = {}) {
       };
       handle(send, msg);
     });
+    // TCP that accepts and never answers (silentTcp): connections are held open
+    // and dropped on close, nothing is ever written back.
+    const mute = state.silentTcp ? net.createServer((s) => { mute.held.push(s); s.on("error", () => {}); }) : null;
+    if (mute) mute.held = [];
+    const listenMute = () =>
+      mute ? new Promise((r) => mute.listen(state.port, "127.0.0.1", r)) : Promise.resolve();
+    const closeMute = () =>
+      mute
+        ? new Promise((r) => {
+            for (const s of mute.held) s.destroy();
+            mute.close(() => r());
+          })
+        : Promise.resolve();
     return new Promise((resolve) => {
-      sock.bind(state.port, "127.0.0.1", () =>
+      sock.bind(state.port, "127.0.0.1", async () => {
+        await listenMute();
         resolve({
           state,
-          close: () => new Promise((r) => sock.close(() => r())),
-        }),
-      );
+          close: async () => {
+            await closeMute();
+            await new Promise((r) => sock.close(() => r()));
+          },
+        });
+      });
     });
   }
 

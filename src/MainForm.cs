@@ -602,11 +602,18 @@ namespace NidhamConnect
 
         async void RunSync(string trigger)
         {
-            if (!cfg.Paired || cfg.Devices.Count == 0 || syncing) return;
+            if (!cfg.Paired || syncing) return;
+            if (cfg.Devices.Count == 0)
+            {
+                // Paired with nothing to read: the server used to see silence. Say why.
+                await Sync.ReportNoDevices(cfg, Log.Write);
+                return;
+            }
             syncing = true; Refresh();
             Log.Write(trigger == "manual" ? "🔄 مزامنة يدوية..." : "🔄 مزامنة تلقائية...");
             foreach (DeviceConfig dev in new List<DeviceConfig>(cfg.Devices))
             {
+                Exception readFailure = null;
                 try
                 {
                     SyncOutcome o = await Sync.Device(cfg, dev, Log.Write);
@@ -630,7 +637,10 @@ namespace NidhamConnect
                         cfg.Token = null; cfg.AgentId = null; cfg.Save();
                         break;
                     }
+                    readFailure = e;
                 }
+                // C# 5 (the csc inside Windows) can't await inside catch.
+                if (readFailure != null) await Sync.ReportFailure(cfg, dev, readFailure, Log.Write);
                 RefreshList();
             }
             syncing = false; Refresh();
